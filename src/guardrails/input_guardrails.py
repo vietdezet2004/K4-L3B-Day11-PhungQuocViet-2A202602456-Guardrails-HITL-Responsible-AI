@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -51,14 +52,21 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
+    normalized_input = re.sub(r"[\u200B-\u200D\uFEFF]", "", user_input)
+
     INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
+        r"ignore\s+(all\s+)?(previous|above)\s+instructions",
+        r"you\s+are\s+now\b",
+        r"\bsystem\s+prompt\b",
+        r"reveal\s+(your\s+)?(instructions|prompt|password|key|internal)",
+        r"pretend\s+(you\s+are|to\s+be)\b",
+        r"act\s+as\s+(a\s+|an\s+)?unrestricted\b",
+        r"bypass\s+all\s+(rules|restrictions|filters)",
+        r"disregard\s+prior\s+(directives|rules)",
     ]
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized_input, re.IGNORECASE):
             return "BLOCK"
     return "ALLOW"
 
@@ -74,6 +82,13 @@ def detect_injection(user_input: str) -> InputStatus:
 # Return ``"ALLOW"`` if banking-related and OK.
 # ============================================================
 
+def _strip_accents(text: str) -> str:
+    """Normalize and strip Vietnamese diacritics for topic matching."""
+    decomposed = unicodedata.normalize("NFD", text)
+    stripped = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return stripped.replace("đ", "d").replace("Đ", "D").lower()
+
+
 def topic_filter(user_input: str) -> InputStatus:
     """Decide whether the input is on-topic for VinBank.
 
@@ -85,13 +100,19 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
     input_lower = user_input.lower()
+    input_unaccented = _strip_accents(user_input)
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    for topic in BLOCKED_TOPICS:
+        pattern = r"\b" + re.escape(topic) + r"\b"
+        if re.search(pattern, input_lower) or re.search(pattern, input_unaccented):
+            return "BLOCK"
 
-    pass  # Replace with your implementation
+    for topic in ALLOWED_TOPICS:
+        pattern = r"\b" + re.escape(topic) + r"\b"
+        if re.search(pattern, input_lower) or re.search(pattern, input_unaccented):
+            return "ALLOW"
+
+    return "BLOCK"
 
 
 # ============================================================
@@ -144,14 +165,19 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối: Phát hiện dấu hiệu prompt injection hoặc vi phạm chính sách bảo mật."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Yêu cầu bị từ chối: VinBank chỉ hỗ trợ các câu hỏi liên quan đến dịch vụ tài chính ngân hàng."
+            )
+
+        return None
 
 
 # ============================================================
